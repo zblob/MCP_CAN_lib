@@ -11,6 +11,7 @@ An example program is included which configures 2x MCP2515 chips on an SPI bus a
 Refer to the original MCP_CAN_lib for additional API example programs.
 
 This library is compatible with any ESP32 board that uses the MCP2515 or MCP25625 CAN protocol controller attached by SPI bus.
+The example also generates the MCP system clock from ESP32, avoiding the need for a hardware crystal.
 
 ===============
 
