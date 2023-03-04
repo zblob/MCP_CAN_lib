@@ -3,6 +3,10 @@
   2012 Copyright (c) Seeed Technology Inc.  All right reserved.
   2017 Copyright (c) Cory J. Fowler  All Rights Reserved.
 
+  2023-03-03
+  Contributor: Dan Goldwater
+  Ported library to ESP-LIB, non-Arduino.
+  
   Author:Loovee
   Contributor: Cory J. Fowler
   2017-09-25
@@ -38,7 +42,7 @@ class MCP_CAN
     INT8U   m_nDta[MAX_CHAR_IN_MESSAGE];                                // Data array
     INT8U   m_nRtr;                                                     // Remote request flag
     INT8U   m_nfilhit;                                                  // The number of the filter that matched the message
-    SPIClass *SPI;                                                       // The SPI-Device used
+    spi_device_handle_t *SPI;                                                       // The SPI-Device used
     INT8U   MCPCS;                                                      // Chip Select pin number
     INT8U   mcpMode;                                                    // Mode to return to after configurations are performed.
     
@@ -107,8 +111,7 @@ class MCP_CAN
     INT8U sendMsg();                                                    // Send message
 
 public:
-    MCP_CAN(INT8U _CS);
-    MCP_CAN(SPIClass *_SPI, INT8U _CS);
+    MCP_CAN(spi_device_handle_t *_SPI, INT8U _CS);
     INT8U begin(INT8U idmodeset, INT8U speedset, INT8U clockset);       // Initialize controller parameters
     INT8U init_Mask(INT8U num, INT8U ext, INT32U ulData);               // Initialize Mask(s)
     INT8U init_Mask(INT8U num, INT32U ulData);                          // Initialize Mask(s)

@@ -24,8 +24,7 @@
 #ifndef _MCP2515DFS_H_
 #define _MCP2515DFS_H_
 
-#include <Arduino.h>
-#include <SPI.h>
+#include "driver/spi_master.h"
 #include <inttypes.h>
 
 #ifndef INT32U
@@ -33,7 +32,7 @@
 #endif
 
 #ifndef INT8U
-#define INT8U byte
+#define INT8U unsigned char
 #endif
 
 // if print debug information
@@ -44,7 +43,7 @@
 /*
  *   Begin mt
  */
-#define TIMEOUTVALUE    2500                                           /* In Microseconds, May need changed depending on application and baud rate */
+#define TIMEOUTVALUE    5000                                           /* In Microseconds, May need changed depending on application and baud rate */
 #define MCP_SIDH        0
 #define MCP_SIDL        1
 #define MCP_EID8        2
@@ -409,8 +408,8 @@
 #define MCP_RXBUF_0 (MCP_RXB0SIDH)
 #define MCP_RXBUF_1 (MCP_RXB1SIDH)
 
-#define MCP2515_SELECT()   digitalWrite(MCPCS, LOW)
-#define MCP2515_UNSELECT() digitalWrite(MCPCS, HIGH)
+#define MCP2515_SELECT()
+#define MCP2515_UNSELECT()
 
 #define MCP2515_OK         (0)
 #define MCP2515_FAIL       (1)

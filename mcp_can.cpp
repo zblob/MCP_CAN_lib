@@ -3,6 +3,10 @@
   2012 Copyright (c) Seeed Technology Inc.  All right reserved.
   2017 Copyright (c) Cory J. Fowler  All Rights Reserved.
 
+  2023-03-03
+  Contributor: Dan Goldwater
+  Ported library to ESP-LIB, non-Arduino.
+
   Author: Loovee
   Contributor: Cory J. Fowler
   2017-09-25
@@ -21,10 +25,20 @@
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-
   1301  USA
 */
-#include "mcp_can.h"
 
-#define spi_readwrite SPI->transfer
-#define spi_read() spi_readwrite(0x00)
+#include <stdio.h>
+#include <cstring>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/gpio.h"
+#include "esp_log.h"
+#include "sdkconfig.h"
+#include "esp_timer.h"
+#include "mcp_can.hpp"
+
+static const char *TAG = "mcp_can";
+
+#define DEBUG_MODE 0
 
 /*********************************************************************************************************
 ** Function name:           mcp2515_reset
@@ -32,12 +46,22 @@
 *********************************************************************************************************/
 void MCP_CAN::mcp2515_reset(void)                                      
 {
-    SPI->beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
-    MCP2515_SELECT();
-    spi_readwrite(MCP_RESET);
-    MCP2515_UNSELECT();
-    SPI->endTransaction();
-    delay(5); // If the MCP2515 was in sleep mode when the reset command was issued then we need to wait a while for it to reset properly
+    spi_transaction_t trans = {};
+    memset(&trans, 0, sizeof(trans));       //Zero out the transaction
+    trans.length = 8;
+    trans.flags = SPI_TRANS_USE_RXDATA | SPI_TRANS_USE_TXDATA;
+    trans.tx_data[0] = MCP_RESET;
+
+    esp_err_t ret;
+    ret = spi_device_acquire_bus(*SPI, portMAX_DELAY);
+    if (ret != ESP_OK) ESP_LOGI(TAG, "spi_device_acquire_bus failed");
+
+    ret = spi_device_polling_transmit(*SPI, &trans);
+    if (ret != ESP_OK) ESP_LOGI(TAG, "spi_device_polling_transmit failed");
+    spi_device_release_bus(*SPI);
+
+    // If the MCP2515 was in sleep mode when the reset command was issued then we need to wait a while for it to reset properly
+    vTaskDelay(5 / portTICK_PERIOD_MS);
 }
 
 /*********************************************************************************************************
@@ -46,52 +70,84 @@ void MCP_CAN::mcp2515_reset(void)
 *********************************************************************************************************/
 INT8U MCP_CAN::mcp2515_readRegister(const INT8U address)                                                                     
 {
-    INT8U ret;
+    spi_transaction_t trans = {};
+    memset(&trans, 0, sizeof(trans));       //Zero out the transaction
+    trans.length = 24;
+    trans.flags = SPI_TRANS_USE_RXDATA | SPI_TRANS_USE_TXDATA;
+    trans.tx_data[0] = MCP_READ;
+    trans.tx_data[1] = address;
+    trans.tx_data[2] = 0x00;
 
-    SPI->beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
-    MCP2515_SELECT();
-    spi_readwrite(MCP_READ);
-    spi_readwrite(address);
-    ret = spi_read();
-    MCP2515_UNSELECT();
-    SPI->endTransaction();
+    esp_err_t ret;
+    ret = spi_device_acquire_bus(*SPI, portMAX_DELAY);
+    if (ret != ESP_OK) ESP_LOGI(TAG, "spi_device_acquire_bus failed");
 
-    return ret;
+    ret = spi_device_polling_transmit(*SPI, &trans);
+    if (ret != ESP_OK) ESP_LOGI(TAG, "spi_device_polling_transmit failed");
+    spi_device_release_bus(*SPI);
+
+    //ESP_LOGI(TAG, "mcp2515_readRegister: %02x", trans.rx_data[2]);
+    return trans.rx_data[2];
 }
 
 /*********************************************************************************************************
 ** Function name:           mcp2515_readRegisterS
 ** Descriptions:            Reads successive data registers
-*********************************************************************************************************/
+********************************************************************************************************/
 void MCP_CAN::mcp2515_readRegisterS(const INT8U address, INT8U values[], const INT8U n)
 {
     INT8U i;
-    SPI->beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
-    MCP2515_SELECT();
-    spi_readwrite(MCP_READ);
-    spi_readwrite(address);
-    // mcp2515 has auto-increment of address-pointer
-    for (i=0; i<n; i++) 
-        values[i] = spi_read();
 
-    MCP2515_UNSELECT();
-    SPI->endTransaction();
+    uint8_t rx_data[n + 2];
+    uint8_t tx_data[n + 2];
+
+    tx_data[0] = MCP_READ;
+    tx_data[1] = address;
+
+    spi_transaction_t trans = {};
+    memset(&trans, 0, sizeof(trans));       //Zero out the transaction
+    trans.length = ((2 + ((size_t)n)) * 8);
+    trans.rx_buffer = rx_data;
+    trans.tx_buffer = tx_data;
+
+    esp_err_t ret;
+    ret = spi_device_acquire_bus(*SPI, portMAX_DELAY);
+    if (ret != ESP_OK) ESP_LOGI(TAG, "spi_device_acquire_bus failed");
+
+    ret = spi_device_polling_transmit(*SPI, &trans);
+    if (ret != ESP_OK) ESP_LOGI(TAG, "spi_device_polling_transmit failed");
+    spi_device_release_bus(*SPI);
+
+    // mcp2515 has auto-increment of address-pointer
+    for (i=0; i<n; i++) {
+        values[i] = rx_data[i+2];
+        // ESP_LOGI(TAG, "rx_data[%d] = %x", i, values[i]);
+    }
 }
 
 /*********************************************************************************************************
 ** Function name:           mcp2515_setRegister
 ** Descriptions:            Sets data register
-*********************************************************************************************************/
+********************************************************************************************************/
 void MCP_CAN::mcp2515_setRegister(const INT8U address, const INT8U value)
 {
-    SPI->beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
-    MCP2515_SELECT();
-    spi_readwrite(MCP_WRITE);
-    spi_readwrite(address);
-    spi_readwrite(value);
-    MCP2515_UNSELECT();
-    SPI->endTransaction();
+    spi_transaction_t trans = {};
+    memset(&trans, 0, sizeof(trans));       //Zero out the transaction
+    trans.length = 24;
+    trans.flags = SPI_TRANS_USE_RXDATA | SPI_TRANS_USE_TXDATA;
+    trans.tx_data[0] = MCP_WRITE;
+    trans.tx_data[1] = address;
+    trans.tx_data[2] = value;
+
+    esp_err_t ret;
+    ret = spi_device_acquire_bus(*SPI, portMAX_DELAY);
+    if (ret != ESP_OK) ESP_LOGI(TAG, "spi_device_acquire_bus failed");
+
+    ret = spi_device_polling_transmit(*SPI, &trans);
+    if (ret != ESP_OK) ESP_LOGI(TAG, "spi_device_polling_transmit failed");
+    spi_device_release_bus(*SPI);
 }
+
 
 /*********************************************************************************************************
 ** Function name:           mcp2515_setRegisterS
@@ -100,16 +156,28 @@ void MCP_CAN::mcp2515_setRegister(const INT8U address, const INT8U value)
 void MCP_CAN::mcp2515_setRegisterS(const INT8U address, const INT8U values[], const INT8U n)
 {
     INT8U i;
-    SPI->beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
-    MCP2515_SELECT();
-    spi_readwrite(MCP_WRITE);
-    spi_readwrite(address);
-       
-    for (i=0; i<n; i++) 
-        spi_readwrite(values[i]);
-	
-    MCP2515_UNSELECT();
-    SPI->endTransaction();
+
+    uint8_t data[n + 2];
+
+    data[0] = MCP_WRITE;
+    data[1] = address;
+
+    for (i=0; i<n; i++) {
+        data[i+2] = values[i];
+    }
+
+    spi_transaction_t trans = {};
+    memset(&trans, 0, sizeof(trans));       //Zero out the transaction
+    trans.length = ((2 + ((size_t)n)) * 8);
+    trans.tx_buffer = data;
+
+    esp_err_t ret;
+    ret = spi_device_acquire_bus(*SPI, portMAX_DELAY);
+    if (ret != ESP_OK) ESP_LOGI(TAG, "spi_device_acquire_bus failed");
+
+    ret = spi_device_polling_transmit(*SPI, &trans);
+    if (ret != ESP_OK) ESP_LOGI(TAG, "spi_device_polling_transmit failed");
+    spi_device_release_bus(*SPI);
 }
 
 /*********************************************************************************************************
@@ -118,15 +186,24 @@ void MCP_CAN::mcp2515_setRegisterS(const INT8U address, const INT8U values[], co
 *********************************************************************************************************/
 void MCP_CAN::mcp2515_modifyRegister(const INT8U address, const INT8U mask, const INT8U data)
 {
-    SPI->beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
-    MCP2515_SELECT();
-    spi_readwrite(MCP_BITMOD);
-    spi_readwrite(address);
-    spi_readwrite(mask);
-    spi_readwrite(data);
-    MCP2515_UNSELECT();
-    SPI->endTransaction();
+    spi_transaction_t trans = {};
+    memset(&trans, 0, sizeof(trans));       //Zero out the transaction
+    trans.length = 32;
+    trans.flags = SPI_TRANS_USE_RXDATA | SPI_TRANS_USE_TXDATA;
+    trans.tx_data[0] = MCP_BITMOD;
+    trans.tx_data[1] = address;
+    trans.tx_data[2] = mask;
+    trans.tx_data[3] = data;
+
+    esp_err_t ret;
+    ret = spi_device_acquire_bus(*SPI, portMAX_DELAY);
+    if (ret != ESP_OK) ESP_LOGI(TAG, "spi_device_acquire_bus failed");
+
+    ret = spi_device_polling_transmit(*SPI, &trans);
+    if (ret != ESP_OK) ESP_LOGI(TAG, "spi_device_polling_transmit failed");
+    spi_device_release_bus(*SPI);
 }
+
 
 /*********************************************************************************************************
 ** Function name:           mcp2515_readStatus
@@ -134,14 +211,22 @@ void MCP_CAN::mcp2515_modifyRegister(const INT8U address, const INT8U mask, cons
 *********************************************************************************************************/
 INT8U MCP_CAN::mcp2515_readStatus(void)                             
 {
-    INT8U i;
-    SPI->beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
-    MCP2515_SELECT();
-    spi_readwrite(MCP_READ_STATUS);
-    i = spi_read();
-    MCP2515_UNSELECT();
-    SPI->endTransaction();
-    return i;
+    spi_transaction_t trans = {};
+    memset(&trans, 0, sizeof(trans));       //Zero out the transaction
+    trans.length = 16;
+    trans.flags = SPI_TRANS_USE_RXDATA | SPI_TRANS_USE_TXDATA;
+    trans.tx_data[0] = MCP_READ_STATUS;
+    trans.tx_data[1] = 0x00;
+
+    esp_err_t ret;
+    ret = spi_device_acquire_bus(*SPI, portMAX_DELAY);
+    if (ret != ESP_OK) ESP_LOGI(TAG, "spi_device_acquire_bus failed");
+
+    ret = spi_device_polling_transmit(*SPI, &trans);
+    if (ret != ESP_OK) ESP_LOGI(TAG, "spi_device_polling_transmit failed");
+    spi_device_release_bus(*SPI);
+
+    return trans.rx_data[1];
 }
 
 /*********************************************************************************************************
@@ -175,7 +260,7 @@ INT8U MCP_CAN::mcp2515_setCANCTRL_Mode(const INT8U newmode)
 	if((mcp2515_readRegister(MCP_CANSTAT) & MODE_MASK) == MCP_SLEEP && newmode != MCP_SLEEP)
 	{
 		// Make sure wake interrupt is enabled
-		byte wakeIntEnabled = (mcp2515_readRegister(MCP_CANINTE) & MCP_WAKIF);
+		uint8_t wakeIntEnabled = (mcp2515_readRegister(MCP_CANINTE) & MCP_WAKIF);
 		if(!wakeIntEnabled)
 			mcp2515_modifyRegister(MCP_CANINTE, MCP_WAKIF, MCP_WAKIF);
 
@@ -208,8 +293,8 @@ INT8U MCP_CAN::mcp2515_setCANCTRL_Mode(const INT8U newmode)
 *********************************************************************************************************/
 INT8U MCP_CAN::mcp2515_requestNewMode(const INT8U newmode)
 {
-	byte startTime = millis();
-
+	uint64_t startTime = esp_timer_get_time();
+    //ESP_LOGI(TAG, "requestNewMode %llu", startTime);
 	// Spam new mode request and wait for the operation  to complete
 	while(1)
 	{
@@ -217,11 +302,14 @@ INT8U MCP_CAN::mcp2515_requestNewMode(const INT8U newmode)
 		// This is inside the loop as sometimes requesting the new mode once doesn't work (usually when attempting to sleep)
 		mcp2515_modifyRegister(MCP_CANCTRL, MODE_MASK, newmode); 
 
-		byte statReg = mcp2515_readRegister(MCP_CANSTAT);
-		if((statReg & MODE_MASK) == newmode) // We're now in the new mode
+		uint8_t statReg = mcp2515_readRegister(MCP_CANSTAT);
+        uint64_t dt = esp_timer_get_time() - startTime;
+        //ESP_LOGI(TAG, "dt %llu", dt);
+		if((statReg & MODE_MASK) == newmode) { // We're now in the new mode
 			return MCP2515_OK;
-		else if((byte)(millis() - startTime) > 200) // Wait no more than 200ms for the operation to complete
+        } else if(dt > 200000) { // Wait no more than 200ms for the operation to complete
 			return MCP2515_FAIL;
+        }
 	}
 }
 
@@ -559,24 +647,24 @@ INT8U MCP_CAN::mcp2515_init(const INT8U canIDMode, const INT8U canSpeed, const I
     if(res > 0)
     {
 #if DEBUG_MODE
-      Serial.println(F("Entering Configuration Mode Failure...")); 
+    ESP_LOGI(TAG, "Entering Configuration Mode Failure...");
 #endif
       return res;
     }
 #if DEBUG_MODE
-    Serial.println(F("Entering Configuration Mode Successful!"));
+    ESP_LOGI(TAG, "Entering Configuration Mode Successful!");
 #endif
 
     // Set Baudrate
     if(mcp2515_configRate(canSpeed, canClock))
     {
 #if DEBUG_MODE
-      Serial.println(F("Setting Baudrate Failure..."));
+    ESP_LOGI(TAG, "Setting Baudrate Failure...");
 #endif
       return res;
     }
 #if DEBUG_MODE
-    Serial.println(F("Setting Baudrate Successful!"));
+    ESP_LOGI(TAG, "Setting Baudrate Successful!");
 #endif
 
     if ( res == MCP2515_OK ) {
@@ -628,7 +716,7 @@ INT8U MCP_CAN::mcp2515_init(const INT8U canIDMode, const INT8U canSpeed, const I
     
             default:
 #if DEBUG_MODE        
-            Serial.println(F("`Setting ID Mode Failure..."));
+            ESP_LOGI(TAG, "Setting ID Mode Failure...");
 #endif           
             return MCP2515_FAIL;
             break;
@@ -639,7 +727,7 @@ INT8U MCP_CAN::mcp2515_init(const INT8U canIDMode, const INT8U canSpeed, const I
         if(res)
         {
 #if DEBUG_MODE        
-          Serial.println(F("Returning to Previous Mode Failure..."));
+          ESP_LOGI(TAG, "Returning to Previous Mode Failure...");
 #endif           
           return res;
         }
@@ -808,25 +896,13 @@ INT8U MCP_CAN::mcp2515_getNextFreeTXBuf(INT8U *txbuf_n)                 /* get N
 
 /*********************************************************************************************************
 ** Function name:           MCP_CAN
-** Descriptions:            Public function to declare CAN class and the /CS pin.
-*********************************************************************************************************/
-MCP_CAN::MCP_CAN(INT8U _CS)
-{
-    MCPCS = _CS;
-    MCP2515_UNSELECT();
-    pinMode(MCPCS, OUTPUT);
-    SPI = SPI;
-}
-
-/*********************************************************************************************************
-** Function name:           MCP_CAN
 ** Descriptions:            Public function to declare CAN class with SPI and the /CS pin.
 *********************************************************************************************************/
-MCP_CAN::MCP_CAN(SPIClass *_SPI, INT8U _CS)
+MCP_CAN::MCP_CAN(spi_device_handle_t *_SPI, INT8U _CS)
 {
-    MCPCS = _CS;
-    MCP2515_UNSELECT();
-    pinMode(MCPCS, OUTPUT);
+    MCPCS = _CS;   // no longer used by this library, ESP-LIB API handles the CS pin by itself.
+    //MCP2515_UNSELECT();
+    //gpio_set_direction((gpio_num_t)MCPCS, GPIO_MODE_OUTPUT);
     SPI = _SPI;
 }
 
@@ -838,7 +914,6 @@ INT8U MCP_CAN::begin(INT8U idmodeset, INT8U speedset, INT8U clockset)
 {
     INT8U res;
 
-    SPI->begin();
     res = mcp2515_init(idmodeset, speedset, clockset);
     if (res == MCP2515_OK)
         return CAN_OK;
@@ -854,12 +929,12 @@ INT8U MCP_CAN::init_Mask(INT8U num, INT8U ext, INT32U ulData)
 {
     INT8U res = MCP2515_OK;
 #if DEBUG_MODE
-    Serial.println(F("Starting to Set Mask!"));
+    ESP_LOGI(TAG, "Starting to Set Mask!");
 #endif
     res = mcp2515_setCANCTRL_Mode(MODE_CONFIG);
     if(res > 0){
 #if DEBUG_MODE
-    Serial.println(F("Entering Configuration Mode Failure...")); 
+    ESP_LOGI(TAG, "Entering Configuration Mode Failure..."); 
 #endif
 	return res;
      }
@@ -876,13 +951,13 @@ INT8U MCP_CAN::init_Mask(INT8U num, INT8U ext, INT32U ulData)
     res = mcp2515_setCANCTRL_Mode(mcpMode);
     if(res > 0){
 #if DEBUG_MODE
-    Serial.println(F("Entering Previous Mode Failure...")); 
-	Serial.println(F("Setting Mask Failure..."));
+    ESP_LOGI(TAG, "Entering Previous Mode Failure..."); 
+	ESP_LOGI(TAG, "Setting Mask Failure...");
 #endif
 	return res;
     }
 #if DEBUG_MODE
-    Serial.println(F("Setting Mask Successful!"));
+    ESP_LOGI(TAG, "Setting Mask Successful!");
 #endif
     return res;
 }
@@ -896,12 +971,12 @@ INT8U MCP_CAN::init_Mask(INT8U num, INT32U ulData)
     INT8U res = MCP2515_OK;
     INT8U ext = 0;
 #if DEBUG_MODE
-    Serial.println(F("Starting to Set Mask!"));
+    ESP_LOGI(TAG, "Starting to Set Mask!");
 #endif
     res = mcp2515_setCANCTRL_Mode(MODE_CONFIG);
     if(res > 0){
 #if DEBUG_MODE
-    Serial.println(F("Entering Configuration Mode Failure...")); 
+    ESP_LOGI(TAG, "Entering Configuration Mode Failure..."); 
 #endif
   return res;
 }
@@ -921,13 +996,13 @@ INT8U MCP_CAN::init_Mask(INT8U num, INT32U ulData)
     res = mcp2515_setCANCTRL_Mode(mcpMode);
     if(res > 0){
 #if DEBUG_MODE
-    Serial.println(F("Entering Previous Mode Failure...")); 
-	Serial.println(F("Setting Mask Failure..."));
+    ESP_LOGI(TAG, "Entering Previous Mode Failure..."); 
+	ESP_LOGI(TAG, "Setting Mask Failure...");
 #endif
     return res;
   }
 #if DEBUG_MODE
-    Serial.println(F("Setting Mask Successful!"));
+    ESP_LOGI(TAG, "Setting Mask Successful!");
 #endif
     return res;
 }
@@ -940,13 +1015,13 @@ INT8U MCP_CAN::init_Filt(INT8U num, INT8U ext, INT32U ulData)
 {
     INT8U res = MCP2515_OK;
 #if DEBUG_MODE
-    Serial.println(F("Starting to Set Filter!"));
+    ESP_LOGI(TAG, "Starting to Set Filter!");
 #endif
     res = mcp2515_setCANCTRL_Mode(MODE_CONFIG);
     if(res > 0)
     {
 #if DEBUG_MODE
-      Serial.println(F("Enter Configuration Mode Failure...")); 
+      ESP_LOGI(TAG, "Enter Configuration Mode Failure..."); 
 #endif
       return res;
     }
@@ -985,13 +1060,13 @@ INT8U MCP_CAN::init_Filt(INT8U num, INT8U ext, INT32U ulData)
     if(res > 0)
     {
 #if DEBUG_MODE
-    Serial.println(F("Entering Previous Mode Failure...")); 
-	Serial.println(F("Setting Filter Failure..."));
+    ESP_LOGI(TAG, "Entering Previous Mode Failure..."); 
+	ESP_LOGI(TAG, "Setting Filter Failure...");
 #endif
       return res;
     }
 #if DEBUG_MODE
-    Serial.println(F("Setting Filter Successful!"));
+    ESP_LOGI(TAG, "Setting Filter Successful!");
 #endif
     
     return res;
@@ -1007,13 +1082,13 @@ INT8U MCP_CAN::init_Filt(INT8U num, INT32U ulData)
     INT8U ext = 0;
     
 #if DEBUG_MODE
-    Serial.println(F("Starting to Set Filter!"));
+    ESP_LOGI(TAG, "Starting to Set Filter!");
 #endif
     res = mcp2515_setCANCTRL_Mode(MODE_CONFIG);
     if(res > 0)
     {
 #if DEBUG_MODE
-      Serial.println(F("Enter Configuration Mode Failure...")); 
+      ESP_LOGI(TAG, "Enter Configuration Mode Failure..."); 
 #endif
       return res;
     }
@@ -1055,13 +1130,13 @@ INT8U MCP_CAN::init_Filt(INT8U num, INT32U ulData)
     if(res > 0)
     {
 #if DEBUG_MODE
-    Serial.println(F("Entering Previous Mode Failure...")); 
-	Serial.println(F("Setting Filter Failure..."));
+    ESP_LOGI(TAG, "Entering Previous Mode Failure..."); 
+	ESP_LOGI(TAG, "Setting Filter Failure...");
 #endif
       return res;
     }
 #if DEBUG_MODE
-    Serial.println(F("Setting Filter Successful!"));
+    ESP_LOGI(TAG, "Setting Filter Successful!");
 #endif
     
     return res;
@@ -1108,13 +1183,13 @@ INT8U MCP_CAN::clearMsg()
 INT8U MCP_CAN::sendMsg()
 {
     INT8U res, res1, txbuf_n;
-    uint32_t uiTimeOut, temp;
+    uint64_t uiTimeOut, temp;
 
-    temp = micros();
-    // 24 * 4 microseconds typical
+    temp = esp_timer_get_time();
     do {
         res = mcp2515_getNextFreeTXBuf(&txbuf_n);                       /* info = addr.                 */
-        uiTimeOut = micros() - temp;
+        uiTimeOut = esp_timer_get_time() - temp;
+        //ESP_LOGI(TAG, "uiTimeout %llu", uiTimeOut);
     } while (res == MCP_ALLTXBUSY && (uiTimeOut < TIMEOUTVALUE));
 
     if(uiTimeOut >= TIMEOUTVALUE) 
@@ -1125,12 +1200,12 @@ INT8U MCP_CAN::sendMsg()
     mcp2515_write_canMsg( txbuf_n);
     mcp2515_modifyRegister( txbuf_n-1 , MCP_TXB_TXREQ_M, MCP_TXB_TXREQ_M );
     
-    temp = micros();
+    temp = esp_timer_get_time();
     do
     {       
         res1 = mcp2515_readRegister(txbuf_n-1);                         /* read send buff ctrl reg 	*/
         res1 = res1 & 0x08;
-        uiTimeOut = micros() - temp;
+        uiTimeOut = esp_timer_get_time() - temp;
     } while (res1 && (uiTimeOut < TIMEOUTVALUE));   
     
     if(uiTimeOut >= TIMEOUTVALUE)                                       /* send msg timeout             */	
